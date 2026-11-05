@@ -174,3 +174,5 @@ jobs:
           path: migration_result.json
 
 # retry trigger
+
+# trigger after repo rename to tick-stock-panel
