@@ -3,13 +3,19 @@ name: Drill Manifest Restore
 # 演练：在临时包名上验证「用本公开仓库的 token 创建新包 + 直接 PUT 旧 manifest」
 # 全程不碰生产包 ghcr.io/a454735639-lab/tick-stock-panel。
 #
+# 用 push 触发（而非 workflow_dispatch）：GitHub 对 workflow_dispatch 的
+# 索引在多 workflow 仓库里不可靠（实测持续返回 422），push 更稳。
+#
 # 要验证的两件事：
 #   A. 公开仓库的 GITHUB_TOKEN 能否创建一个新包（应成功，且为 PUBLIC）
 #   B. 新包能否直接 PUT 旧包的 manifest（blob 全局去重，应 201）
 #      —— 若 B 失败，说明删包后无法零重建恢复，必须改走逐 tag 重新构建
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/drill-restore.yml'
 
 env:
   REGISTRY: ghcr.io
@@ -123,16 +129,9 @@ jobs:
             "https://ghcr.io/v2/${DST}/manifests/fused-v0.3.29")
           echo "drill fused-v0.3.29 manifest: HTTP ${CODE}"
 
-      - name: Cleanup drill package
+      - name: Upload drill result
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          DST="${{ env.OWNER }}/${{ env.DRILL_PKG }}"
-          echo "== deleting drill package =="
-          curl -s -o /dev/null -w "delete_versions=%{http_code}\n" \
-            -X DELETE -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/users/${OWNER}/packages/container/${DRILL_PKG}/versions?per_page=100"
-          echo "done (package may linger in 'deleted' state for a while)"
+        uses: actions/upload-artifact@v4
+        with:
+          name: drill-result
+          path: drill_result.json
