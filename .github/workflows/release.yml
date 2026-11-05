@@ -105,14 +105,28 @@ jobs:
       # ── 验证：匿名（不带任何凭据）能否拉到 ─────────────────────────────
       - name: Verify anonymous pull
         run: |
-          set -euo pipefail
+          set -uo pipefail
           IMG="${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel"
-          for TAG in fused-latest fused-v0.3.29 latest; do
+          TAGS=""
+          [ "${{ inputs.fuse }}" = "true" ] && TAGS="$TAGS fused-latest fused-v0.3.29"
+          [ "${{ inputs.base }}" = "true" ] && TAGS="$TAGS latest"
+          if [ -z "$TAGS" ]; then
+            echo "SKIP: neither fuse nor base was requested, nothing to verify."
+            exit 0
+          fi
+          for TAG in $TAGS; do
             echo "--- anonymous check: ${IMG}:${TAG}"
             # 完全不带 Authorization 头，走匿名 token 流程
-            TOK=$(curl -sf "https://ghcr.io/token?scope=repository:${{ env.OWNER }}/tick-stock-panel:pull&service=ghcr.io" \
-                  | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))")
-            if [ -z "$TOK" ]; then echo "  ANON_TOKEN_DENIED"; exit 1; fi
+            BODY=$(curl -s "https://ghcr.io/token?scope=repository:${{ env.OWNER }}/tick-stock-panel:pull&service=ghcr.io")
+            TOK=$(printf '%s' "$BODY" | python3 -c "
+import json,sys
+try: print(json.load(sys.stdin).get('token',''))
+except Exception: print('')
+")
+            if [ -z "$TOK" ]; then
+              echo "  ANON_TOKEN_DENIED -- package is still PRIVATE"
+              exit 1
+            fi
             CODE=$(curl -s -o /dev/null -w '%{http_code}' \
                    -H "Authorization: Bearer ${TOK}" \
                    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
