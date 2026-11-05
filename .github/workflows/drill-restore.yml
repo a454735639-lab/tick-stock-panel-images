@@ -1,0 +1,138 @@
+name: Drill Manifest Restore
+
+# 演练：在临时包名上验证「用本公开仓库的 token 创建新包 + 直接 PUT 旧 manifest」
+# 全程不碰生产包 ghcr.io/a454735639-lab/tick-stock-panel。
+#
+# 要验证的两件事：
+#   A. 公开仓库的 GITHUB_TOKEN 能否创建一个新包（应成功，且为 PUBLIC）
+#   B. 新包能否直接 PUT 旧包的 manifest（blob 全局去重，应 201）
+#      —— 若 B 失败，说明删包后无法零重建恢复，必须改走逐 tag 重新构建
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: a454735639-lab
+  SRC_REPO: a454735639-lab/tick-stock-panel
+  DRILL_PKG: tick-stock-panel-drill
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Fetch manifest backup from private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: pkg-backup
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ssh-known-hosts: |
+            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          path: backup
+          sparse-checkout: pkg_manifests_backup.json
+          persist-credentials: false
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Drill: create package + restore manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          SRC="${{ env.OWNER }}/tick-stock-panel"
+          DST="${{ env.OWNER }}/${{ env.DRILL_PKG }}"
+          export SRC DST
+
+          echo "=== A. token for drill package ==="
+          DT=$(curl -sf -u "probe:${GH_TOKEN}" \
+            "https://ghcr.io/token?scope=repository:${DST}:pull,push&service=ghcr.io" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))")
+          export DT
+          echo "drill_token_len=${#DT}"
+          [ -z "$DT" ] && { echo "NO_DRILL_TOKEN"; exit 1; }
+
+          echo "=== B. push manifests into drill package ==="
+          python3 - <<'PY'
+          import json, subprocess, os
+          dst = os.environ["DST"]
+          tok = os.environ["DT"]
+          mans = json.load(open("backup/pkg_manifests_backup.json", encoding="utf-8"))
+          ok, fail = 0, []
+          for rec in mans:
+              tag = rec["tag"]; body = rec.get("manifest")
+              mt = rec.get("mediaType") or "application/vnd.oci.image.index.v1+json"
+              if not body:
+                  fail.append((tag, "no body")); continue
+              data = json.dumps(body).encode()
+              p = subprocess.run(
+                  ["curl","-s","-o","/tmp/put.out","-w","%{http_code}",
+                   "-X","PUT",
+                   "-H",f"Authorization: Bearer {tok}",
+                   "-H",f"Content-Type: {mt}",
+                   "--data-binary","@-",
+                   f"https://ghcr.io/v2/{dst}/manifests/{tag}"],
+                  input=data, capture_output=True, text=True)
+              code = p.stdout.strip()
+              if code == "201":
+                  ok += 1
+                  if ok <= 5 or tag.startswith("fused"):
+                      print(f"  OK   {tag}")
+              else:
+                  err = open("/tmp/put.out", encoding="utf-8", errors="replace").read()[:220]
+                  fail.append((tag, f"{code} {err}"))
+                  print(f"  FAIL {tag} {code} {err}")
+          print(f"\nDRILL RESULT: {ok}/{len(mans)} restored")
+          for t, e in fail[:8]:
+              print("  -", t, e)
+          json.dump({"ok": ok, "total": len(mans), "failures": fail},
+                    open("drill_result.json","w",encoding="utf-8"), ensure_ascii=False, indent=1)
+          PY
+
+      - name: Verify drill package anonymously
+        run: |
+          set -uo pipefail
+          DST="${{ env.OWNER }}/${{ env.DRILL_PKG }}"
+          BODY=$(curl -s "https://ghcr.io/token?scope=repository:${DST}:pull&service=ghcr.io")
+          TOK=$(printf '%s' "$BODY" | python3 -c "
+          import json,sys
+          try: print(json.load(sys.stdin).get('token',''))
+          except Exception: print('')
+          ")
+          if [ -z "$TOK" ]; then echo "DRILL ANON DENIED"; exit 1; fi
+          echo "DRILL ANON TOKEN OK"
+          curl -s -H "Authorization: Bearer ${TOK}" "https://ghcr.io/v2/${DST}/tags/list?n=1000" \
+            > /tmp/dt.json
+          python3 -c "
+          import json
+          t=json.load(open('/tmp/dt.json',encoding='utf-8')).get('tags') or []
+          print('drill tags:',len(t)); print(t)
+          "
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${TOK}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/${DST}/manifests/fused-v0.3.29")
+          echo "drill fused-v0.3.29 manifest: HTTP ${CODE}"
+
+      - name: Cleanup drill package
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          DST="${{ env.OWNER }}/${{ env.DRILL_PKG }}"
+          echo "== deleting drill package =="
+          curl -s -o /dev/null -w "delete_versions=%{http_code}\n" \
+            -X DELETE -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/${OWNER}/packages/container/${DRILL_PKG}/versions?per_page=100"
+          echo "done (package may linger in 'deleted' state for a while)"
