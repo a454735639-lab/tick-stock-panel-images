@@ -42,25 +42,35 @@ jobs:
         with:
           path: self
 
-      - name: Fetch manifest backup from private repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SRC_REPO }}
-          ref: ${{ inputs.source_branch }}
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
-          ssh-known-hosts: |
-            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-          path: backup
-          sparse-checkout: pkg_manifests_backup.json
-          persist-credentials: false
+      # 直接用 API 读取备份文件（比 sparse-checkout 稳：
+      # 文件名里的下划线在部分 shell/日志层会被吞掉）
+      - name: Fetch manifest backup via API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRC_REPO: ${{ env.SRC_REPO }}
+          BACKUP_BRANCH: pkg-backup
+        run: |
+          set -euo pipefail
+          mkdir -p backup
+          URL="https://api.github.com/repos/${SRC_REPO}/contents/pkg_manifests_backup.json?ref=${BACKUP_BRANCH}"
+          CODE=$(curl -s -o backup/manifests.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "${URL}")
+          echo "backup fetch http=${CODE}"
+          if [ "${CODE}" != "200" ]; then
+            echo "ABORT: cannot read manifest backup"
+            exit 1
+          fi
+          echo "backup bytes: $(stat -c%s backup/manifests.json)"
 
       - name: Check backup file
         run: |
           set -euo pipefail
-          ls -la backup/pkg_manifests_backup.json
+          ls -la backup/manifests.json
           python3 -c "
           import json
-          d=json.load(open('backup/pkg_manifests_backup.json',encoding='utf-8'))
+          d=json.load(open('backup/manifests.json',encoding='utf-8'))
           print('manifests to restore:',len(d))
           assert len(d)>0, 'empty backup'
           "
@@ -112,7 +122,7 @@ jobs:
           import json, subprocess, os, sys
           pkg = os.environ.get("PKG") or "a454735639-lab/tick-stock-panel"
           tok = os.environ["TOK"]
-          mans = json.load(open("backup/pkg_manifests_backup.json", encoding="utf-8"))
+          mans = json.load(open("backup/manifests.json", encoding="utf-8"))
           ok, fail = 0, []
           for rec in mans:
               tag = rec["tag"]

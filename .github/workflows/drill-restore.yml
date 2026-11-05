@@ -36,17 +36,21 @@ jobs:
         with:
           path: self
 
-      - name: Fetch manifest backup from private repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SRC_REPO }}
-          ref: pkg-backup
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
-          ssh-known-hosts: |
-            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-          path: backup
-          sparse-checkout: pkg_manifests_backup.json
-          persist-credentials: false
+      - name: Fetch manifest backup via API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRC_REPO: ${{ env.SRC_REPO }}
+          BACKUP_BRANCH: pkg-backup
+        run: |
+          set -euo pipefail
+          mkdir -p backup
+          URL="https://api.github.com/repos/${SRC_REPO}/contents/pkg_manifests_backup.json?ref=${BACKUP_BRANCH}"
+          CODE=$(curl -s -o backup/manifests.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "${URL}")
+          echo "backup fetch http=${CODE}"
+          [ "${CODE}" = "200" ] || { echo "ABORT: cannot read manifest backup"; exit 1; }
 
       - name: Log in to the Container registry
         uses: docker/login-action@v3
@@ -77,7 +81,7 @@ jobs:
           import json, subprocess, os
           dst = os.environ["DST"]
           tok = os.environ["DT"]
-          mans = json.load(open("backup/pkg_manifests_backup.json", encoding="utf-8"))
+          mans = json.load(open("backup/manifests.json", encoding="utf-8"))
           ok, fail = 0, []
           for rec in mans:
               tag = rec["tag"]; body = rec.get("manifest")
