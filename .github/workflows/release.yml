@@ -36,11 +36,6 @@ on:
         description: "构建纯应用镜像 (上游 TSP)"
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/release.yml'
-      - 'scripts/**'
 
 env:
   REGISTRY: ghcr.io

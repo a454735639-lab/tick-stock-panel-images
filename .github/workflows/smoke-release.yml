@@ -1,0 +1,96 @@
+name: Smoke Test Release Pipeline
+
+# 冒烟测试：验证"私有源仓库 → 构建 → 推到公开包 → 匿名可拉"整条链路。
+#
+# 与 release.yml 的区别：
+#   - 推到 **临时标签** smoke-<sha>，绝不碰生产标签（latest / fused-latest / fused-v0.3.29）
+#   - 跑完可在 GHCR 包页面手动删除该标签
+#   - 存在的意义：确认 deploy key 拉源码、buildx 双架构构建、推公开包、
+#     匿名可拉这四段都通，且不影响线上。
+#
+# 触发：手动 dispatch，或 push 到 main 时（仅当本文件或 scripts/ 变化）。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/smoke-release.yml'
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: a454735639-lab
+  PKG: tick-stock-panel-images
+  SOURCE_REPO: a454735639-lab/tick-stock-panel-src
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout this repo (helper scripts)
+        uses: actions/checkout@v4
+        with:
+          path: self
+
+      - name: Checkout private source (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ssh-known-hosts: |
+            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          path: src
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push smoke image (temporary tag only)
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: src/deploy/nas/Dockerfile.fused
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple
+            PIP_EXTRA_INDEX_URL=https://pypi.org/simple
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:smoke-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify anonymous pull of smoke tag
+        working-directory: self
+        run: |
+          set -euo pipefail
+          PKG="${OWNER}/${PKG}"
+          TAG="smoke-${{ github.sha }}"
+          TOK=$(curl -s "https://ghcr.io/token?scope=repository:${PKG}:pull&service=ghcr.io" \
+            | python3 scripts/anon_token.py)
+          if [ -z "$TOK" ]; then
+            echo "ANON_TOKEN_DENIED -- package is NOT public"
+            exit 1
+          fi
+          echo "ANON_TOKEN_OK -> package is PUBLIC"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${TOK}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/${PKG}/manifests/${TAG}")
+          echo "  manifest ${TAG}: HTTP ${CODE}"
+          [ "$CODE" = "200" ] || exit 1
+          echo "SMOKE PIPELINE OK (tag ${TAG} 可在 GHCR 包页面删除)"
