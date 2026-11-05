@@ -16,6 +16,9 @@ name: Publish Public Package
 # 不需要重新构建（已验证 27/27 恢复成功）。
 #
 # 本 workflow 幂等：可重复运行。
+#
+# 注意：所有 Python 逻辑都放在 scripts/publish_public.py 里，
+# 避免在 YAML block scalar 里内嵌多行 Python 造成缩进错误。
 
 on:
   workflow_dispatch:
@@ -23,6 +26,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/publish-public.yml'
+      - 'scripts/publish_public.py'
+      - 'backup/manifests.json'
 
 env:
   REGISTRY: ghcr.io
@@ -46,109 +51,19 @@ jobs:
         run: |
           set -euo pipefail
           ls -la self/backup/manifests.json
-          python3 -c "
-          import json
-          d=json.load(open('self/backup/manifests.json',encoding='utf-8'))
-          print('manifests to publish:',len(d))
-          assert len(d)>0, 'empty backup'
-          "
+          python3 -c "import json;d=json.load(open('self/backup/manifests.json',encoding='utf-8'));print('manifests to publish:',len(d));assert len(d)>0"
 
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish manifests
+      - name: Publish manifests and verify anonymous pull
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: self
         run: |
-          set -uo pipefail
-          PKG="${OWNER}/${PKG}"
-          export PKG
-          TOK=$(curl -sf -u "probe:${GH_TOKEN}" \
-            "https://ghcr.io/token?scope=repository:${PKG}:pull,push&service=ghcr.io" \
-            | python3 scripts/anon_token.py)
-          export TOK
-          echo "token_len=${#TOK}"
-          if [ -z "$TOK" ]; then echo "NO_TOKEN"; exit 1; fi
-
-          python3 - <<'PY'
-          import json, subprocess, os
-          pkg = os.environ["PKG"]
-          tok = os.environ["TOK"]
-          mans = json.load(open("self/backup/manifests.json", encoding="utf-8"))
-          ok, fail = 0, []
-          for rec in mans:
-              tag = rec["tag"]
-              body = rec.get("manifest")
-              mt = rec.get("mediaType") or "application/vnd.oci.image.index.v1+json"
-              if not body:
-                  fail.append((tag, "no manifest body"))
-                  continue
-              data = json.dumps(body).encode()
-              p = subprocess.run(
-                  ["curl","-s","-o","/tmp/put.out","-w","%{http_code}",
-                   "-X","PUT",
-                   "-H",f"Authorization: Bearer {tok}",
-                   "-H",f"Content-Type: {mt}",
-                   "--data-binary","@-",
-                   f"https://ghcr.io/v2/{pkg}/manifests/{tag}"],
-                  input=data.decode(), capture_output=True, text=True)
-              code = p.stdout.strip()
-              if code == "201":
-                  ok += 1
-                  print(f"  OK   {tag}")
-              else:
-                  err = open("/tmp/put.out", encoding="utf-8", errors="replace").read()[:220]
-                  fail.append((tag, f"{code} {err}"))
-                  print(f"  FAIL {tag} {code} {err}")
-          print(f"\nPUBLISHED {ok}/{len(mans)}")
-          for t, e in fail[:10]:
-              print("  -", t, e)
-          json.dump({"published": ok, "total": len(mans),
-                     "failures": [{"tag": t, "error": e} for t, e in fail]},
-                    open("publish_result.json","w",encoding="utf-8"),
-                    ensure_ascii=False, indent=1)
-          if fail:
-              raise SystemExit(1)
-          PY
-
-      - name: Verify anonymous pull
-        run: |
-          set -uo pipefail
-          PKG="${OWNER}/${PKG}"
-          BODY=$(curl -s "https://ghcr.io/token?scope=repository:${PKG}:pull&service=ghcr.io")
-          TOK=$(printf '%s' "$BODY" | python3 scripts/anon_token.py)
-          if [ -z "$TOK" ]; then
-            echo "ANON_TOKEN_DENIED -- package is NOT public"
-            exit 1
-          fi
-          echo "ANON_TOKEN_OK -> package is PUBLIC"
-          curl -s -H "Authorization: Bearer ${TOK}" "https://ghcr.io/v2/${PKG}/tags/list?n=1000" > /tmp/t.json
-          python3 -c "
-          import json
-          t=json.load(open('/tmp/t.json',encoding='utf-8')).get('tags') or []
-          print('tags visible anonymously:',len(t))
-          print(sorted(t))
-          assert 'fused-v0.3.29' in t, 'production tag missing'
-          assert 'fused-latest' in t, 'fused-latest missing'
-          assert 'latest' in t, 'latest missing'
-          print('CRITICAL TAGS PRESENT')
-          "
-          for TAG in fused-v0.3.29 fused-latest latest; do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${TOK}" \
-              -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
-              "https://ghcr.io/v2/${PKG}/manifests/${TAG}")
-            echo "  manifest ${TAG}: HTTP ${CODE}"
-            [ "$CODE" = "200" ] || exit 1
-          done
+          set -euo pipefail
+          python3 scripts/publish_public.py
 
       - name: Upload publish result
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: publish-result
-          path: publish_result.json
+          path: self/publish_result.json
