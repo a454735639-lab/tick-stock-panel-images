@@ -1,0 +1,123 @@
+name: Release Images
+
+# 公开发布流水线（源码不公开，镜像公开）
+#
+# 这个仓库本身不含任何私有源码，只放"怎么构建"的配方：
+#   1. 用只读 deploy key 从私有仓库 a454735639-lab/tick-stock-panel 拉源码
+#   2. 在本仓库的 CI 里构建镜像
+#   3. 用本仓库的 GITHUB_TOKEN 推送到 ghcr.io/a454735639-lab/tick-stock-panel
+#
+# 为什么这么做（实测结论，勿轻易改动）：
+#   - GHCR 包的可见性在"首次创建"时继承创建它的仓库：
+#     私有仓库首推 = PRIVATE，公开仓库首推 = PUBLIC。
+#   - 已存在的包不会跟随关联仓库的可见性翻转（REST API 里根本没有
+#     "改可见性"的端点，GraphQL 也没有 Package mutation）。
+#   - 包的推送权跟随"创建它的仓库"：别的仓库的令牌推不进去
+#     （write_package / read_package denied）。
+#   => 所以要让镜像匿名可拉，必须由公开仓库来创建/推送这个包。
+#
+# 前提：私有源仓库已注册本仓库对应的只读 deploy key
+#       （标题 workbuddy-release-pipeline）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuse:
+        description: "构建融合镜像 (adapter + 面板 + 上游应用)"
+        type: boolean
+        default: true
+      base:
+        description: "构建纯应用镜像 (上游 TSP)"
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: a454735639-lab
+  SOURCE_REPO: a454735639-lab/tick-stock-panel
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout private source (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ssh-known-hosts: |
+            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          path: src
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 纯应用镜像 ────────────────────────────────────────────────────
+      - name: Build and push base image
+        if: ${{ inputs.base == true }}
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            USE_CN_MIRROR=0
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 融合镜像（生产在用）────────────────────────────────────────────
+      - name: Build and push fused image
+        if: ${{ inputs.fuse == true }}
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: src/deploy/nas/Dockerfile.fused
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple
+            PIP_EXTRA_INDEX_URL=https://pypi.org/simple
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:fused-latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:fused-v0.3.29
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:fused-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 验证：匿名（不带任何凭据）能否拉到 ─────────────────────────────
+      - name: Verify anonymous pull
+        run: |
+          set -euo pipefail
+          IMG="${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel"
+          for TAG in fused-latest fused-v0.3.29 latest; do
+            echo "--- anonymous check: ${IMG}:${TAG}"
+            # 完全不带 Authorization 头，走匿名 token 流程
+            TOK=$(curl -sf "https://ghcr.io/token?scope=repository:${{ env.OWNER }}/tick-stock-panel:pull&service=ghcr.io" \
+                  | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))")
+            if [ -z "$TOK" ]; then echo "  ANON_TOKEN_DENIED"; exit 1; fi
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+                   -H "Authorization: Bearer ${TOK}" \
+                   -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
+                   "https://ghcr.io/v2/${{ env.OWNER }}/tick-stock-panel/manifests/${TAG}")
+            echo "  manifest HTTP ${CODE}"
+            [ "$CODE" = "200" ] || exit 1
+          done
+          echo "ALL ANONYMOUS CHECKS PASSED"
