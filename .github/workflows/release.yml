@@ -3,9 +3,9 @@ name: Release Images
 # 公开发布流水线（源码不公开，镜像公开）
 #
 # 这个仓库本身不含任何私有源码，只放"怎么构建"的配方：
-#   1. 用只读 deploy key 从私有仓库 a454735639-lab/tick-stock-panel 拉源码
+#   1. 用只读 deploy key 从私有仓库 a454735639-lab/tick-stock-panel-src 拉源码
 #   2. 在本仓库的 CI 里构建镜像
-#   3. 用本仓库的 GITHUB_TOKEN 推送到 ghcr.io/a454735639-lab/tick-stock-panel-src
+#   3. 用本仓库的 GITHUB_TOKEN 推送到 ghcr.io/a454735639-lab/tick-stock-panel-images
 #
 # 为什么这么做（实测结论，勿轻易改动）：
 #   - GHCR 包的可见性在"首次创建"时继承创建它的仓库：
@@ -14,10 +14,16 @@ name: Release Images
 #     "改可见性"的端点，GraphQL 也没有 Package mutation）。
 #   - 包的推送权跟随"创建它的仓库"：别的仓库的令牌推不进去
 #     （write_package / read_package denied）。
-#   => 所以要让镜像匿名可拉，必须由公开仓库来创建/推送这个包。
+#   - 包名一旦被用过，即使删除，名字仍被占用（最长 30 天可 restore），
+#     期间别的仓库无法接管。
+#   => 所以要让镜像匿名可拉，必须由公开仓库来创建/推送这个包，
+#      且包名一旦定下来就不能再改。
 #
 # 前提：私有源仓库已注册本仓库对应的只读 deploy key
 #       （标题 workbuddy-release-pipeline）。
+#
+# 注意：所有 Python 逻辑都放在 scripts/ 下，避免在 YAML block scalar 里
+#       内嵌多行 Python 造成缩进错误。
 
 on:
   workflow_dispatch:
@@ -30,10 +36,16 @@ on:
         description: "构建纯应用镜像 (上游 TSP)"
         type: boolean
         default: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/**'
 
 env:
   REGISTRY: ghcr.io
   OWNER: a454735639-lab
+  PKG: tick-stock-panel-images
   SOURCE_REPO: a454735639-lab/tick-stock-panel-src
 
 jobs:
@@ -44,6 +56,11 @@ jobs:
       packages: write
 
     steps:
+      - name: Checkout this repo (helper scripts)
+        uses: actions/checkout@v4
+        with:
+          path: self
+
       - name: Checkout private source (read-only deploy key)
         uses: actions/checkout@v4
         with:
@@ -78,8 +95,8 @@ jobs:
           build-args: |
             USE_CN_MIRROR=0
           tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:latest
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:sha-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -96,17 +113,18 @@ jobs:
             PIP_INDEX_URL=https://pypi.org/simple
             PIP_EXTRA_INDEX_URL=https://pypi.org/simple
           tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:fused-latest
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:fused-v0.3.29
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel:fused-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:fused-latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:fused-v0.3.29
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:fused-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       # ── 验证：匿名（不带任何凭据）能否拉到 ─────────────────────────────
       - name: Verify anonymous pull
+        working-directory: self
         run: |
           set -uo pipefail
-          IMG="${{ env.REGISTRY }}/${{ env.OWNER }}/tick-stock-panel"
+          PKG="${OWNER}/${PKG}"
           TAGS=""
           [ "${{ inputs.fuse }}" = "true" ] && TAGS="$TAGS fused-latest fused-v0.3.29"
           [ "${{ inputs.base }}" = "true" ] && TAGS="$TAGS latest"
@@ -115,10 +133,10 @@ jobs:
             exit 0
           fi
           for TAG in $TAGS; do
-            echo "--- anonymous check: ${IMG}:${TAG}"
+            echo "--- anonymous check: ${PKG}:${TAG}"
             # 完全不带 Authorization 头，走匿名 token 流程
-            BODY=$(curl -s "https://ghcr.io/token?scope=repository:${{ env.OWNER }}/tick-stock-panel:pull&service=ghcr.io")
-            TOK=$(printf '%s' "$BODY" | python3 scripts/anon_token.py)
+            TOK=$(curl -s "https://ghcr.io/token?scope=repository:${PKG}:pull&service=ghcr.io" \
+              | python3 scripts/anon_token.py)
             if [ -z "$TOK" ]; then
               echo "  ANON_TOKEN_DENIED -- package is still PRIVATE"
               exit 1
@@ -126,7 +144,7 @@ jobs:
             CODE=$(curl -s -o /dev/null -w '%{http_code}' \
                    -H "Authorization: Bearer ${TOK}" \
                    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
-                   "https://ghcr.io/v2/${{ env.OWNER }}/tick-stock-panel/manifests/${TAG}")
+                   "https://ghcr.io/v2/${PKG}/manifests/${TAG}")
             echo "  manifest HTTP ${CODE}"
             [ "$CODE" = "200" ] || exit 1
           done
