@@ -43,11 +43,16 @@
 | 标签 | 内容 |
 |---|---|
 | `fused-latest` | 融合镜像：上游 TSP + akshare 适配器 + 财务调度 + Streamlit 面板 |
-| `fused-v0.3.29` | 同上，固定版本（生产在用） |
+| `fused-v0.3.29` | 同上，固定版本（**生产在用**） |
 | `latest` | 纯上游应用镜像 |
 | `sha-<commit>` / `fused-<commit>` | 按提交可追溯 |
 
-均为 `linux/amd64` + `linux/arm64` 双架构。
+均为 `linux/amd64` + `linux/arm64` 双架构 + 2 个 attestation 证明。
+
+> 历史上还有一批按 commit 命名的归档标签，它们在迁移时只搬了 index 层、
+> 实际拉不下来，已被清理（`scripts/prune_broken_tags.py`）。
+> 对应的源码 commit 都还在私有仓库里，需要时用 `Rebuild Images` 的
+> `source_ref` 输入指定 commit 重建即可。
 
 ## 怎么用
 
@@ -61,7 +66,7 @@ docker pull ghcr.io/a454735639-lab/tick-stock-panel-images:fused-v0.3.29
 
 | 工作流 | 作用 | 触发方式 |
 |---|---|---|
-| `Rebuild Images` | **发布镜像的唯一正确方式**：从私有源仓库拉源码 → 构建 → 推公开包 → 完整拉取链路校验 | 手动 dispatch |
+| `Rebuild Images` | **发布镜像的唯一方式**：从私有源仓库拉源码 → 构建 → 推公开包 → 完整拉取链路校验 | 手动 dispatch |
 | `Smoke Test Release Pipeline` | 冒烟：验证整条链路，但只推临时标签 `smoke-<sha>`，不碰生产标签 | 手动 dispatch / push |
 | `Publish Public Package` | 只发布 `backup/manifests.json` 里的 **index 层**（见下方警告） | 手动 dispatch / push |
 
