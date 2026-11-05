@@ -20,7 +20,7 @@ on:
 env:
   REGISTRY: ghcr.io
   OWNER: a454735639-lab
-  SRC_REPO: a454735639-lab/tick-stock-panel
+  SRC_REPO: a454735639-lab/tick-stock-panel-src
   DRILL_PKG: tick-stock-panel-drill
 
 jobs:

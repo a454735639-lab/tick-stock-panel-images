@@ -1,0 +1,74 @@
+name: Drill Rename Proof
+
+# 决定性验证：GHCR 包的推送权到底跟什么绑定？
+#
+# 假设 A：包的推送权绑定「与包同名的仓库」。
+#   -> 公开仓库改名成包名后，其 GITHUB_TOKEN 才能推该包。
+#
+# 实验设计（全程用一次性探测名，不碰生产包）：
+#   步骤1: 公开仓库 probe-renamed-pub 推包 probe-renamed-target
+#          （仓库名 != 包名）-> 预期 write_package denied
+#   步骤2: 用 PAT（本地改名）把仓库改名成 probe-renamed-target
+#   步骤3: 再次推送 -> 若成功，则证明「同名」是关键
+#
+# 本 workflow 只做步骤1与步骤3的探测；步骤2由本地脚本用 PAT 完成。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/drill-rename.yml'
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: a454735639-lab
+  TARGET: probe-renamed-target
+  OLD_NAME: probe-renamed-pub
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Probe push with current repo name
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          PKG="${OWNER}/${TARGET}"
+          export PKG
+          echo "repo name now: ${GITHUB_REPOSITORY}"
+          echo "package target: ${PKG}"
+          TOK=$(curl -sf -u "probe:${GH_TOKEN}" \
+            "https://ghcr.io/token?scope=repository:${PKG}:pull,push&service=ghcr.io" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))")
+          export TOK
+          echo "token_len=${#TOK}"
+          if [ -z "$TOK" ]; then echo "NO_TOKEN"; exit 1; fi
+          cat > /tmp/idx.json <<'JSON'
+          {"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}
+          JSON
+          CODE=$(curl -s -o /tmp/put.out -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer ${TOK}" \
+            -H "Content-Type: application/vnd.oci.image.index.v1+json" \
+            --data-binary @/tmp/idx.json \
+            "https://ghcr.io/v2/${PKG}/manifests/probe-tag")
+          echo "PUT manifest http=${CODE}"
+          head -c 300 /tmp/put.out; echo
+
+      - name: Verify anonymous
+        run: |
+          set -uo pipefail
+          PKG="${OWNER}/${TARGET}"
+          BODY=$(curl -s "https://ghcr.io/token?scope=repository:${PKG}:pull&service=ghcr.io")
+          TOK=$(printf '%s' "$BODY" | python3 -c "
+          import json,sys
+          try: print(json.load(sys.stdin).get('token',''))
+          except Exception: print('')
+          ")
+          if [ -z "$TOK" ]; then echo "ANON DENIED (package private or absent)"; exit 0; fi
+          echo "ANON TOKEN OK -> PUBLIC"
+          curl -s -H "Authorization: Bearer ${TOK}" "https://ghcr.io/v2/${PKG}/tags/list" | head -c 300; echo

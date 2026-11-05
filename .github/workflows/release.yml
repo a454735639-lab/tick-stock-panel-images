@@ -5,7 +5,7 @@ name: Release Images
 # 这个仓库本身不含任何私有源码，只放"怎么构建"的配方：
 #   1. 用只读 deploy key 从私有仓库 a454735639-lab/tick-stock-panel 拉源码
 #   2. 在本仓库的 CI 里构建镜像
-#   3. 用本仓库的 GITHUB_TOKEN 推送到 ghcr.io/a454735639-lab/tick-stock-panel
+#   3. 用本仓库的 GITHUB_TOKEN 推送到 ghcr.io/a454735639-lab/tick-stock-panel-src
 #
 # 为什么这么做（实测结论，勿轻易改动）：
 #   - GHCR 包的可见性在"首次创建"时继承创建它的仓库：
@@ -34,7 +34,7 @@ on:
 env:
   REGISTRY: ghcr.io
   OWNER: a454735639-lab
-  SOURCE_REPO: a454735639-lab/tick-stock-panel
+  SOURCE_REPO: a454735639-lab/tick-stock-panel-src
 
 jobs:
   release:

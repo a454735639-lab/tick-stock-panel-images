@@ -26,7 +26,7 @@ env:
   REGISTRY: ghcr.io
   OWNER: a454735639-lab
   PKG: tick-stock-panel
-  SRC_REPO: a454735639-lab/tick-stock-panel
+  SRC_REPO: a454735639-lab/tick-stock-panel-src
 
 jobs:
   migrate:
