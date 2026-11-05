@@ -1,16 +1,39 @@
 #!/usr/bin/env python3
-"""把备份的 manifest 原样发布到公开容器包，并做匿名可拉验证。
+"""把备份的 manifest 发布到公开容器包，并做**完整拉取链路**验证。
 
-背景（全部为实测结论）：
-  - GHCR 包的可见性在"首次创建"时继承创建它的仓库：
+⚠️ 重要限制（实测教训，动手前务必读完）
+-----------------------------------------
+这个脚本**只能发布多架构 index（manifest list）这一层**，
+备份文件里不含子 manifest 的 body（只有 digest 引用），所以它**无法**
+把一个多架构镜像还原成可拉取的状态。
+
+真实事故：曾用本脚本把 27 个标签的 index 原样 PUT 到新包，
+`GET manifest by tag` 全部返回 200，看着一切正常，
+但 `docker pull` 必然失败 —— docker 的流程是
+「取 index → 按平台挑子 manifest → 取子 manifest → 取 config → 取层」，
+第 3 步 404 MANIFEST_UNKNOWN。子 manifest 从未上传过。
+
+因此：
+  - **发布镜像请用 rebuild-images.yml**（从私有源码重建，
+    buildx 会把 index、子 manifest、config、各层 blob 一并推上去）。
+  - 本脚本仅保留作为"标签/index 占位与清单核对"的辅助工具，
+    且**绝不可**用它的 200 结果来判断镜像可拉。
+
+其它实测结论（GHCR）：
+  - 包的可见性在"首次创建"时继承创建它的仓库：
     私有仓库首推 = PRIVATE，公开仓库首推 = PUBLIC。
   - 已存在的包不会跟随仓库可见性翻转；REST / GraphQL 都没有改可见性的端点。
   - 包的推送权跟随"创建它的仓库"：别的仓库的令牌推不进去
     （write_package denied）。
   - 包名一旦被用过，即使删除，名字仍被占用（最长 30 天可 restore），
     期间别的仓库无法接管 —— 所以本次用新包名 tick-stock-panel-images。
-  - GHCR 的 blob 按 digest 全局去重，因此可以把 manifest 原样 PUT 回去，
-    不需要重新构建（drill-restore 已验证 27/27 恢复成功）。
+
+字节序列化（digest 一致性）
+---------------------------
+manifest 的 digest 是**原始字节**的 sha256。用 `json.dumps(body)` 的默认
+分隔符（", " / ": "）会改变字节，从而改变 digest —— 即使语义完全等价。
+要保持 digest 不变必须用紧凑分隔符 `(",", ":")`。
+（本次迁移中线上 digest 与备份 digest 全部不一致，就是这个原因。）
 
 本脚本独立于 workflow 的 YAML，避开 block scalar 的缩进陷阱；
 所有 HTTP 用 urllib 实现，不依赖 curl 的引号转义。
@@ -95,7 +118,9 @@ def publish(mans, tok):
             failures.append({"tag": tag, "error": "missing tag or manifest body"})
             print(f"  SKIP {tag}: missing tag/body")
             continue
-        payload = json.dumps(body).encode("utf-8")
+        # 用紧凑分隔符保持与备份一致的原始字节，
+        # 否则 digest 会变（语义等价但字节不同）。
+        payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
         status, text = http(
             f"https://{REGISTRY}/v2/{FULL_PKG}/manifests/{tag}",
             method="PUT",
