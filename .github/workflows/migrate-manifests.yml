@@ -39,6 +39,11 @@ jobs:
 
     steps:
       # 从私有仓库取 manifest 备份（需要能读私有仓库 —— 用 deploy key）
+      - name: Checkout this repo (for helper scripts)
+        uses: actions/checkout@v4
+        with:
+          path: self
+
       - name: Fetch manifest backup from private repo
         uses: actions/checkout@v4
         with:
@@ -132,11 +137,7 @@ jobs:
           set -uo pipefail
           PKG="${{ env.OWNER }}/${{ env.PKG }}"
           BODY=$(curl -s "https://ghcr.io/token?scope=repository:${PKG}:pull&service=ghcr.io")
-          TOK=$(printf '%s' "$BODY" | python3 -c "
-          import json,sys
-          try: print(json.load(sys.stdin).get('token',''))
-          except Exception: print('')
-          ")
+          TOK=$(printf '%s' "$BODY" | python3 self/scripts/anon_token.py)
           if [ -z "$TOK" ]; then
             echo "ANON_TOKEN_DENIED -- package is still PRIVATE"
             exit 1

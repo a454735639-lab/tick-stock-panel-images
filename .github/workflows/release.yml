@@ -118,11 +118,7 @@ jobs:
             echo "--- anonymous check: ${IMG}:${TAG}"
             # 完全不带 Authorization 头，走匿名 token 流程
             BODY=$(curl -s "https://ghcr.io/token?scope=repository:${{ env.OWNER }}/tick-stock-panel:pull&service=ghcr.io")
-            TOK=$(printf '%s' "$BODY" | python3 -c "
-import json,sys
-try: print(json.load(sys.stdin).get('token',''))
-except Exception: print('')
-")
+            TOK=$(printf '%s' "$BODY" | python3 scripts/anon_token.py)
             if [ -z "$TOK" ]; then
               echo "  ANON_TOKEN_DENIED -- package is still PRIVATE"
               exit 1
