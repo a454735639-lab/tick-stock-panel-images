@@ -17,12 +17,10 @@ name: Migrate Package Manifests
 #       私有仓库的 pkg-backup.yml 已把 manifest 完整存档，可安全回滚。
 
 on:
-  workflow_dispatch:
-    inputs:
-      source_branch:
-        description: "存放 manifest 备份的分支（私有仓库）"
-        type: string
-        default: "pkg-backup"
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/migrate-manifests.yml'
 
 env:
   REGISTRY: ghcr.io
@@ -77,6 +75,25 @@ jobs:
       # 恢复每个 tag 的 manifest。
       # GHCR 的 blob 是按 digest 全局去重的，所以即使包是新建的，
       # 只要 blob 还在 registry 里，PUT manifest 就能直接引用。
+      # 守卫：确认旧私有包已被删除（同名包不能共存），再重建
+      - name: Guard - verify old package is gone
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          PKG="${{ env.OWNER }}/${{ env.PKG }}"
+          CODE=$(curl -s -o /tmp/exists.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/${OWNER}/packages/container/${PKG}")
+          echo "old package GET http=${CODE}"
+          if [ "$CODE" = "200" ]; then
+            echo "ABORT: package still exists -- delete it first (pkg-delete.yml)"
+            head -c 300 /tmp/exists.json; echo
+            exit 1
+          fi
+          echo "old package confirmed absent"
+
       - name: Restore manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
