@@ -1,0 +1,110 @@
+name: Diagnose Package Ownership
+
+# 诊断：tick-stock-panel 这个包到底还存在吗？归属谁？
+# 从私有源仓库的 CI 里查（它的 GITHUB_TOKEN 有 packages:read）。
+# 同时从公开仓库的 CI 里查（它的令牌能不能写）。
+#
+# 查两件事：
+#   1. 包的 version 列表（带 repository 关联信息）
+#   2. 用公开仓库的令牌尝试写一个临时 manifest（不指定生产标签）
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose.yml'
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: a454735639-lab
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      packages: write
+
+    steps:
+      - name: Diagnose via API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          echo "=== A. package metadata (REST) ==="
+          for P in "users/${OWNER}/packages/container/tick-stock-panel" \
+                   "users/${OWNER}/packages/container/tick-stock-panel-src" \
+                   "user/packages/container/tick-stock-panel"; do
+            CODE=$(curl -s -o /tmp/p.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/${P}")
+            echo "  GET /${P} -> ${CODE}"
+            if [ "$CODE" = "200" ]; then
+              python3 -c "
+              import json
+              d=json.load(open('/tmp/p.json'))
+              print('    name:',d.get('name'),'| visibility:',d.get('visibility'),'| repo:',(d.get('repository') or {}).get('full_name'))
+              "
+            else
+              head -c 160 /tmp/p.json; echo
+            fi
+          done
+
+          echo "=== B. versions list ==="
+          CODE=$(curl -s -o /tmp/v.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/${OWNER}/packages/container/tick-stock-panel/versions?per_page=100")
+          echo "  versions http=${CODE}"
+          python3 -c "
+          import json
+          try:
+              d=json.load(open('/tmp/v.json'))
+              if isinstance(d,list):
+                  print('  count:',len(d))
+                  for v in d[:10]:
+                      print('   ',v.get('name'),(v.get('metadata') or {}).get('container',{}).get('tags'))
+              else: print(' ',d)
+          except Exception as e: print('  parse err',e)
+          "
+
+          echo "=== C. registry-level tags/list (authenticated) ==="
+          for PKGN in tick-stock-panel tick-stock-panel-src; do
+            TOK=$(curl -sf -u "probe:${GH_TOKEN}" \
+              "https://ghcr.io/token?scope=repository:${OWNER}/${PKGN}:pull&service=ghcr.io" \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))")
+            if [ -z "$TOK" ]; then echo "  ${PKGN}: NO ANON/AUTH TOKEN"; continue; fi
+            CODE=$(curl -s -o /tmp/t.json -w '%{http_code}' -H "Authorization: Bearer ${TOK}" \
+              "https://ghcr.io/v2/${OWNER}/${PKGN}/tags/list?n=1000")
+            N=$(python3 -c "
+          import json
+          try:
+              d=json.load(open('/tmp/t.json')); print(len(d.get('tags') or []))
+          except Exception: print('?')
+          ")
+            echo "  ${PKGN}: tags http=${CODE} count=${N}"
+          done
+
+      - name: Test write to production package name
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          PKG="${OWNER}/tick-stock-panel"
+          TOK=$(curl -sf -u "probe:${GH_TOKEN}" \
+            "https://ghcr.io/token?scope=repository:${PKG}:pull,push&service=ghcr.io" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))")
+          export TOK
+          echo "token_len=${#TOK}"
+          if [ -z "$TOK" ]; then echo "NO_TOKEN"; exit 0; fi
+          echo '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}' > /tmp/i.json
+          CODE=$(curl -s -o /tmp/p.out -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer ${TOK}" \
+            -H "Content-Type: application/vnd.oci.image.index.v1+json" \
+            --data-binary @/tmp/i.json \
+            "https://ghcr.io/v2/${PKG}/manifests/__diag_probe__")
+          echo "PUT manifest http=${CODE}"
+          head -c 300 /tmp/p.out; echo
