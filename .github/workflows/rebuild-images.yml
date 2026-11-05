@@ -1,0 +1,138 @@
+name: Rebuild Images
+
+# 从私有源仓库完整重建镜像并推送到公开包。
+#
+# 为什么需要重建（而不是把旧 manifest 原样搬过去）
+# ------------------------------------------------
+# 多架构镜像在 registry 里有两层：index(manifest list) + 各自的子 manifest。
+# 只搬 index 的话，docker pull 走到"按平台取子 manifest"这步会 404 ——
+# 标签看起来在，实际拉不下来。
+#
+# 所以正确的迁移方式是**重建**：buildx 推上去时会把 index、子 manifest、
+# config、每一层 blob 全部带上，天然完整。
+#
+# 前提：私有源仓库已注册本仓库对应的只读 deploy key
+#      （标题 workbuddy-release-pipeline）。
+#
+# 手动触发（生产发布是刻意行为，不设 push 自动触发）：
+#   Actions → Rebuild Images → Run workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuse:
+        description: "重建融合镜像 (adapter + 面板 + 上游应用)"
+        type: boolean
+        default: true
+      base:
+        description: "重建纯应用镜像 (上游 TSP)"
+        type: boolean
+        default: true
+      source_ref:
+        description: "源码 ref（分支 / tag / commit sha），默认 main"
+        type: string
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: a454735639-lab
+  PKG: tick-stock-panel-images
+  SOURCE_REPO: a454735639-lab/tick-stock-panel-src
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout this repo (helper scripts)
+        uses: actions/checkout@v4
+        with:
+          path: self
+
+      - name: Checkout private source (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.source_ref || 'main' }}
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          ssh-known-hosts: |
+            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          path: src
+          persist-credentials: false
+
+      - name: Sync version numbers from frontend/package.json
+        working-directory: src
+        run: python3 scripts/sync_versions.py
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 纯应用镜像 ────────────────────────────────────────────────────
+      - name: Build and push base image
+        if: ${{ inputs.base == true }}
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            USE_CN_MIRROR=0
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 融合镜像（生产在用）────────────────────────────────────────────
+      - name: Build and push fused image
+        if: ${{ inputs.fuse == true }}
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: src/deploy/nas/Dockerfile.fused
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple
+            PIP_EXTRA_INDEX_URL=https://pypi.org/simple
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:fused-latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:fused-v0.3.29
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.PKG }}:fused-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 验证：走完 docker 的完整解析链路 ───────────────────────────────
+      # 不能只验 "index HTTP 200"：那只说明标签在，
+      # 真正决定能否 pull 的是"取子 manifest → 取 config → 取层"。
+      - name: Verify full pull chain
+        working-directory: self
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          TAGS=""
+          if [ "${{ inputs.fuse }}" = "true" ]; then TAGS="$TAGS fused-v0.3.29 fused-latest"; fi
+          if [ "${{ inputs.base }}" = "true" ]; then TAGS="$TAGS latest"; fi
+          echo "验证标签: $TAGS"
+          python3 scripts/verify_pullable.py $TAGS
+
+      # ── 验证：匿名（不带任何凭据）也能拉 ───────────────────────────────
+      - name: Verify anonymous pull chain
+        working-directory: self
+        env:
+          GH_TOKEN: ""
+        run: python3 scripts/verify_pullable.py fused-v0.3.29 fused-latest latest
