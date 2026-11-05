@@ -111,7 +111,7 @@ jobs:
                    "-H",f"Content-Type: {mt}",
                    "--data-binary","@-",
                    f"https://ghcr.io/v2/{pkg}/manifests/{tag}"],
-                  input=data, capture_output=True, text=True)
+                  input=data.decode(), capture_output=True, text=True)
               code = p.stdout.strip()
               if code == "201":
                   ok += 1
