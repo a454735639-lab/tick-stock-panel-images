@@ -20,8 +20,8 @@
   PKG         包名（不含 owner），默认 tick-stock-panel-images
   REGISTRY    镜像仓库，默认 ghcr.io
   GH_TOKEN    GitHub token（CI 里用 secrets.GITHUB_TOKEN）
-  BACKUP_FILE manifest 备份路径，默认 self/backup/manifests.json
-  RESULT_FILE 结果输出路径，默认 publish_result.json
+  BACKUP_FILE manifest 备份路径，默认 <repo>/backup/manifests.json
+  RESULT_FILE 结果输出路径，默认 <repo>/publish_result.json
 """
 import base64
 import json
@@ -30,12 +30,21 @@ import sys
 import urllib.error
 import urllib.request
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+# 脚本位于 <repo>/scripts/，仓库根目录就是它的上一级。
+# 用脚本自身位置定位备份文件，避免受 workflow 的 working-directory 影响。
+REPO_ROOT = os.path.dirname(HERE)
+
 OWNER = os.environ.get("OWNER", "a454735639-lab")
 PKG = os.environ.get("PKG", "tick-stock-panel-images")
 REGISTRY = os.environ.get("REGISTRY", "ghcr.io")
 GH_TOKEN = os.environ.get("GH_TOKEN", "")
-BACKUP_FILE = os.environ.get("BACKUP_FILE", "self/backup/manifests.json")
-RESULT_FILE = os.environ.get("RESULT_FILE", "publish_result.json")
+BACKUP_FILE = os.environ.get(
+    "BACKUP_FILE", os.path.join(REPO_ROOT, "backup", "manifests.json")
+)
+RESULT_FILE = os.environ.get(
+    "RESULT_FILE", os.path.join(REPO_ROOT, "publish_result.json")
+)
 
 FULL_PKG = f"{OWNER}/{PKG}"
 OCI_INDEX = "application/vnd.oci.image.index.v1+json"
